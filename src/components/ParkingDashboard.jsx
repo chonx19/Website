@@ -50,6 +50,7 @@ import {
 } from '@mui/icons-material';
 import './ParkingDashboard.css';
 import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import api from '../api/config';
 
 function TabPanel({ children, value, index }) {
   return (
@@ -144,6 +145,8 @@ const ParkingDashboard = () => {
   const [authError, setAuthError] = useState('');
   const [parkingDurations, setParkingDurations] = useState({});
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   const theme = createTheme({
     typography: {
@@ -191,103 +194,103 @@ const ParkingDashboard = () => {
     setCurrentTab(newValue);
   };
 
-  const handleSlotClick = (slotId) => {
-    setParkingSlots(prevSlots => {
-      const currentOccupiedCount = prevSlots.filter(s => s.isOccupied).length;
-      const dayIndex = new Date().getDay();
-      const currentHour = new Date().getHours();
-      const currentTime = new Date();
-
-      return prevSlots.map(slot => {
-        if (slot.id === slotId) {
-          if (!slot.isOccupied) {
-            // Entry logic
-            setDetailedParkingHistory(prev => [...prev, {
-              slotId,
-              entryTime: currentTime,
-              exitTime: null,
-              duration: null,
-              status: 'Parked',
-              payment: null
-            }]);
-            setWeeklyData(prevWeekly => {
-              const newData = [...prevWeekly];
-              if (currentOccupiedCount < 16) {
-                newData[dayIndex] = {
-                  ...newData[dayIndex],
-                  cars: currentOccupiedCount + 1,
-                  dailyTotal: prevWeekly[dayIndex].dailyTotal + 1
-                };
-              }
-              return newData;
-            });
-
-            // Update parking activity
-            setParkingActivity(prev => {
-              const newActivity = [...prev];
-              const newCount = currentOccupiedCount + 1;
-              newActivity[currentHour] = {
-                time: `${currentHour.toString().padStart(2, '0')}:00`,
-                count: Math.max(newCount, prev[currentHour].count)
-              };
-              return newActivity;
-            });
-
-            return {
-              ...slot,
-              isOccupied: true,
-              vehicle: 'Car',
-              entryTime: currentTime,
-              payment: 0
-            };
-          } else {
-            // Exit logic
-            const parkingDuration = currentTime - new Date(slot.entryTime);
-            const hours = Math.ceil(parkingDuration / (1000 * 60 * 60));
-            const payment = hours <= 1 ? 10 : 10 + (hours - 1) * 20;
-
-            setDetailedParkingHistory(prev => {
-              const updatedHistory = prev.map(record => {
-                if (record.slotId === slotId && !record.exitTime) {
-                  return {
-                    ...record,
-                    exitTime: currentTime,
-                    duration: parkingDuration,
-                    status: 'Completed',
-                    payment
-                  };
-                }
-                return record;
-              });
-              return updatedHistory;
-            });
-            setWeeklyData(prev => {
-              const newData = [...prev];
-              newData[dayIndex] = {
-                ...newData[dayIndex],
-                cars: currentOccupiedCount - 1,
-              };
-              return newData;
-            });
-
-            setDailyParkingTime(prev => prev + parkingDuration);
-
-            const newTotalSlotEarnings = slot.totalSlotEarnings + payment;
-            setTotalEarningsHistory(prev => prev + payment);
-
-            return {
-              ...slot,
-              isOccupied: false,
-              vehicle: null,
-              entryTime: null,
-              payment: payment,
-              totalSlotEarnings: newTotalSlotEarnings
-            };
-          }
+  // Update the useEffect and fetchParkingData function
+  useEffect(() => {
+    const initializeData = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        
+        // Fetch initial parking slots from the server
+        const slots = await api.getParkingSlots();
+        if (slots && slots.length > 0) {
+          setParkingSlots(slots);
+        } else {
+          // Initialize default parking slots if no data exists
+          const initialParkingSlots = Array(16).fill().map((_, index) => ({
+            id: index + 1,
+            isOccupied: false,
+            vehicle: null,
+            entryTime: null,
+            payment: 0,
+            totalSlotEarnings: 0
+          }));
+          setParkingSlots(initialParkingSlots);
         }
-        return slot;
-      });
-    });
+      } catch (error) {
+        console.error('Error initializing data:', error);
+        setError(error.message);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    initializeData();
+  }, []);
+
+  // Update the handleSlotClick function
+  const handleSlotClick = async (slotId) => {
+    try {
+      setIsLoading(true);
+      const currentTime = new Date().toISOString();
+      const slot = parkingSlots.find(s => s.id === slotId);
+
+      if (!slot.isOccupied) {
+        // Entry logic
+        const updatedSlot = await api.updateParkingSlot(slotId, {
+          isOccupied: true,
+          entryTime: currentTime,
+          payment: 0
+        });
+        
+        await api.addParkingHistory({
+          slotId,
+          entryTime: currentTime,
+          status: 'Parked'
+        });
+
+        // Update local state
+        setParkingSlots(prevSlots => 
+          prevSlots.map(s => s.id === slotId ? updatedSlot : s)
+        );
+
+        // Update weekly data
+        const dayIndex = new Date().getDay();
+        setWeeklyData(prev => {
+          const newData = [...prev];
+          newData[dayIndex] = {
+            ...newData[dayIndex],
+            cars: newData[dayIndex].cars + 1,
+            dailyTotal: newData[dayIndex].dailyTotal + 1
+          };
+          return newData;
+        });
+      } else {
+        // Exit logic
+        const parkingDuration = new Date() - new Date(slot.entryTime);
+        const payment = calculateParkingFee(parkingDuration);
+
+        const updatedSlot = await api.updateParkingSlot(slotId, {
+          isOccupied: false,
+          entryTime: null,
+          payment
+        });
+
+        // Update local state
+        setParkingSlots(prevSlots => 
+          prevSlots.map(s => s.id === slotId ? updatedSlot : s)
+        );
+
+        // Update earnings and time
+        setTotalEarningsHistory(prev => prev + payment);
+        setDailyParkingTime(prev => prev + parkingDuration);
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      setError(error.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Helper function to count occupied slots
@@ -1296,6 +1299,26 @@ const ParkingDashboard = () => {
             setAuthData({ phone: '', password: '', confirmPassword: '' });
           }}
         />
+
+        {/* Add loading indicator in the render */}
+        {isLoading && (
+          <Box
+            sx={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              zIndex: 9999,
+            }}
+          >
+            <CircularProgress />
+          </Box>
+        )}
       </Box>
     </ThemeProvider>
   );
